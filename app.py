@@ -49,7 +49,8 @@ st.subheader(f'正在分析：{selected_stock}')
 # --- 資料處理函數 ---
 @st.cache_data
 def load_data(ticker):
-    data = yf.download(ticker, period='6mo')
+    # 使用 auto_adjust=True 排除除權息產生的物理缺口，只看價格走勢缺口
+    data = yf.download(ticker, period='6mo', auto_adjust=True)
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
     return data
@@ -69,25 +70,23 @@ def find_last_gap(df, type='up'):
     for i in range(len(df)-1, 0, -1):
         curr = df.iloc[i]
         prev = df.iloc[i-1]
+        latest_price = df.iloc[-1]['Close']
         
         if type == 'up':
-            # 多頭跳空缺口：今日最低價 > 昨日最高價
             if curr['Low'] > prev['High']:
                 gap_top, gap_bottom = curr['Low'], prev['High']
-                latest_price = df.iloc[-1]['Close']
-                if latest_price >= gap_top: status = "✅ 站穩缺口（強勢）"
-                elif latest_price > gap_bottom: status = "⚠️ 正在回補缺口中"
-                else: status = "❌ 缺口已完全回補（轉弱）"
+                if latest_price >= gap_top: status = "✅ 站穩缺口"
+                elif latest_price > gap_bottom: status = "⚠️ 正在回補中"
+                else: status = "❌ 已回補跌破"
                 return {'日期': df.index[i].strftime('%Y-%m-%d'), '上緣': f"{gap_top:.2f}", '下緣': f"{gap_bottom:.2f}", '狀態': status, '價位': gap_top}
         else:
-            # 空頭(下跌)跳空缺口：今日最高價 < 昨日最低價
-            if curr['High'] < prev['Low']:
+            # 下跌缺口：昨日最低 > 今日最高
+            if prev['Low'] > curr['High']:
                 gap_top, gap_bottom = prev['Low'], curr['High']
-                latest_price = df.iloc[-1]['Close']
-                # 使用者需求：站上（>= 上緣）
-                if latest_price >= gap_top: status = "🚀 已站上缺口（強勢反轉）"
-                elif latest_price > gap_bottom: status = "⚠️ 正在回補缺口中"
-                else: status = "❌ 尚未回補缺口"
+                # 關鍵修正：站上缺口定義為 收盤價 >= 下跌前之最低價 (gap_top)
+                if latest_price >= gap_top: status = "🚀 已站上缺口"
+                elif latest_price > gap_bottom: status = "⚠️ 正在回補中"
+                else: status = "❌ 尚未回補"
                 return {'日期': df.index[i].strftime('%Y-%m-%d'), '上緣': f"{gap_top:.2f}", '下緣': f"{gap_bottom:.2f}", '狀態': status, '價位': gap_top}
     return None
 
@@ -102,18 +101,18 @@ def scan_stocks(categories, min_count):
     for i, (name, sym) in enumerate(all_tickers):
         df = load_data(sym)
         df = calculate_technical_indicators(df)
-        if len(df) < 21: continue
+        if len(df) < 5: continue
         
         last = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # 1. 成交量為五日均量的兩倍
+        # 1. 量增
         cond1 = last['Volume'] >= (last['VMA5'] * 2)
-        # 2. 成交價高於五日、十日、二十日均線
+        # 2. 價強
         cond2 = (last['Close'] > last['MA5']) and (last['Close'] > last['MA10']) and (last['Close'] > last['MA20'])
-        # 3. 五日、十日、二十日均線趨勢均向上
+        # 3. 趨勢向上
         cond3 = (last['MA5'] > prev['MA5']) and (last['MA10'] > prev['MA10']) and (last['MA20'] > prev['MA20'])
-        # 4. 股價已站上最近一次跳空下跌缺口 (Close >= Gap Top)
+        # 4. 站上最近下跌缺口 (精確判斷)
         down_gap = find_last_gap(df, type='down')
         cond4 = False
         if down_gap and "已站上" in down_gap['狀態']:
@@ -122,12 +121,15 @@ def scan_stocks(categories, min_count):
         conditions_met = sum([cond1, cond2, cond3, cond4])
         
         if conditions_met >= min_count:
+            # 決定顯示的狀態
+            gap_info = down_gap['狀態'] if down_gap else "無缺口"
             results.append({
                 '股票名稱': name,
-                '今日收盤': f"{last['Close']:.2f}",
+                '收盤價': f"{last['Close']:.2f}",
                 '符合數': f"{conditions_met}/4",
-                '符合項目': (['量增'] if cond1 else []) + (['價強'] if cond2 else []) + (['趨勢'] if cond3 else []) + (['站上缺口'] if cond4 else []),
-                '下跌缺口日': down_gap['日期'] if down_gap else "無"
+                '符合項目': (['量'] if cond1 else []) + (['價'] if cond2 else []) + (['線'] if cond3 else []) + (['缺'] if cond4 else []),
+                '下跌缺口狀態': gap_info,
+                '缺口日期': down_gap['日期'] if down_gap else "-"
             })
         progress_bar.progress((i + 1) / len(all_tickers))
     return results
