@@ -62,6 +62,37 @@ def calculate_technical_indicators(df):
     df['VMA5'] = df['Volume'].rolling(window=5).mean()
     return df
 
+def find_last_gap(df):
+    """偵測最近一次的跳空缺口 (多頭)"""
+    if len(df) < 2: return None
+    # 找最近 60 天內的缺口
+    for i in range(len(df)-1, 0, -1):
+        curr = df.iloc[i]
+        prev = df.iloc[i-1]
+        
+        # 多頭跳空缺口：今日最低價 > 昨日最高價
+        if curr['Low'] > prev['High']:
+            gap_top = curr['Low']
+            gap_bottom = prev['High']
+            
+            # 判斷目前狀態 (以最新收盤價判定)
+            latest_price = df.iloc[-1]['Close']
+            status = ""
+            if latest_price >= gap_top:
+                status = "✅ 站上缺口（強勢）"
+            elif latest_price > gap_bottom:
+                status = "⚠️ 正在回補缺口中"
+            else:
+                status = "❌ 缺口已完全回補（弱勢）"
+                
+            return {
+                '日期': df.index[i].strftime('%Y-%m-%d'),
+                '缺口上緣': f"{gap_top:.2f}",
+                '缺口下緣': f"{gap_bottom:.2f}",
+                '目前狀態': status
+            }
+    return None
+
 def scan_strong_stocks(categories):
     results = []
     all_tickers = []
@@ -133,6 +164,17 @@ with tab1:
 
         fig.update_layout(template='plotly_dark', xaxis_rangeslider_visible=False, height=600)
         st.plotly_chart(fig, use_container_width=True)
+
+        # 新增：跳空缺口分析顯示
+        gap_info = find_last_gap(data)
+        if gap_info:
+            st.markdown(f"#### 🔍 最近一次跳空缺口分析 ({gap_info['日期']})")
+            gcol1, gcol2, gcol3 = st.columns(3)
+            gcol1.write(f"**缺口上緣：** {gap_info['缺口上緣']}")
+            gcol2.write(f"**缺口下緣：** {gap_info['缺口下緣']}")
+            gcol3.write(f"**目前狀態：** {gap_info['目前狀態']}")
+        else:
+            st.info("💡 最近 60 天內未偵測到明顯的多頭跳空缺口。")
         
         st.markdown("### 📊 近期數據詳情")
         st.dataframe(data.tail(10).style.highlight_max(axis=0), use_container_width=True)
