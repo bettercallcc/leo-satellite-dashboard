@@ -62,35 +62,32 @@ def calculate_technical_indicators(df):
     df['VMA5'] = df['Volume'].rolling(window=5).mean()
     return df
 
-def find_last_gap(df):
-    """偵測最近一次的跳空缺口 (多頭)"""
+def find_last_gap(df, type='up'):
+    """偵測最近一次的跳空缺口 (up: 多頭跳空, down: 空頭跳空)"""
     if len(df) < 2: return None
     # 找最近 60 天內的缺口
     for i in range(len(df)-1, 0, -1):
         curr = df.iloc[i]
         prev = df.iloc[i-1]
         
-        # 多頭跳空缺口：今日最低價 > 昨日最高價
-        if curr['Low'] > prev['High']:
-            gap_top = curr['Low']
-            gap_bottom = prev['High']
-            
-            # 判斷目前狀態 (以最新收盤價判定)
-            latest_price = df.iloc[-1]['Close']
-            status = ""
-            if latest_price >= gap_top:
-                status = "✅ 站上缺口（強勢）"
-            elif latest_price > gap_bottom:
-                status = "⚠️ 正在回補缺口中"
-            else:
-                status = "❌ 缺口已完全回補（弱勢）"
-                
-            return {
-                '日期': df.index[i].strftime('%Y-%m-%d'),
-                '缺口上緣': f"{gap_top:.2f}",
-                '缺口下緣': f"{gap_bottom:.2f}",
-                '目前狀態': status
-            }
+        if type == 'up':
+            # 多頭跳空缺口：今日最低價 > 昨日最高價
+            if curr['Low'] > prev['High']:
+                gap_top, gap_bottom = curr['Low'], prev['High']
+                latest_price = df.iloc[-1]['Close']
+                if latest_price >= gap_top: status = "✅ 站穩缺口（強勢）"
+                elif latest_price > gap_bottom: status = "⚠️ 正在回補缺口中"
+                else: status = "❌ 缺口已完全回補（轉弱）"
+                return {'日期': df.index[i].strftime('%Y-%m-%d'), '上緣': f"{gap_top:.2f}", '下緣': f"{gap_bottom:.2f}", '狀態': status, '價位': gap_top}
+        else:
+            # 空頭(下跌)跳空缺口：今日最高價 < 昨日最低價
+            if curr['High'] < prev['Low']:
+                gap_top, gap_bottom = prev['Low'], curr['High']
+                latest_price = df.iloc[-1]['Close']
+                if latest_price >= gap_top: status = "🚀 已回補並站上缺口（強勢反轉）"
+                elif latest_price > gap_bottom: status = "⚠️ 正在回補缺口中（嘗試止跌）"
+                else: status = "❌ 尚未回補缺口（弱勢格局）"
+                return {'日期': df.index[i].strftime('%Y-%m-%d'), '上緣': f"{gap_top:.2f}", '下緣': f"{gap_bottom:.2f}", '狀態': status, '價位': gap_top}
     return None
 
 def scan_strong_stocks(categories):
@@ -109,25 +106,31 @@ def scan_strong_stocks(categories):
         last = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # 條件 1: 成交量為五日均量的兩倍
+        # 原有條件
         cond1 = last['Volume'] >= (last['VMA5'] * 2)
-        
-        # 條件 2: 成交價高於五日、十日、二十日均線
         cond2 = (last['Close'] > last['MA5']) and (last['Close'] > last['MA10']) and (last['Close'] > last['MA20'])
-        
-        # 條件 3: 五日、十日、二十日均線趨勢均向上 (今日均線 > 昨日均線)
         cond3 = (last['MA5'] > prev['MA5']) and (last['MA10'] > prev['MA10']) and (last['MA20'] > prev['MA20'])
         
-        # 計算符合條件的數量
-        conditions_met = sum([cond1, cond2, cond3])
+        # 新增條件：站上或正在回補最近一次的下跌缺口
+        down_gap = find_last_gap(df, type='down')
+        cond4 = False
+        gap_status = "無缺口"
+        if down_gap:
+            gap_status = down_gap['狀態']
+            if "已回補" in gap_status or "正在回補" in gap_status:
+                cond4 = True
+        
+        # 計算符合條件的數量 (現在總共有 4 個條件)
+        conditions_met = sum([cond1, cond2, cond3, cond4])
         
         if conditions_met >= 2:
             results.append({
                 '股票名稱': name,
                 '今日收盤': f"{last['Close']:.2f}",
                 '漲跌幅': f"{((last['Close']-prev['Close'])/prev['Close']*100):.2f}%",
-                '符合條件數': f"{conditions_met}/3",
-                '符合項目': (['✅量增'] if cond1 else []) + (['✅價強'] if cond2 else []) + (['✅多頭趨勢'] if cond3 else [])
+                '符合條件': f"{conditions_met}/4",
+                '項目': (['✅量增'] if cond1 else []) + (['✅價強'] if cond2 else []) + (['✅趨勢'] if cond3 else []) + (['✅缺口回補'] if cond4 else []),
+                '下跌缺口狀態': gap_status
             })
         progress_bar.progress((i + 1) / len(all_tickers))
     return results
@@ -166,15 +169,23 @@ with tab1:
         st.plotly_chart(fig, use_container_width=True)
 
         # 新增：跳空缺口分析顯示
-        gap_info = find_last_gap(data)
-        if gap_info:
-            st.markdown(f"#### 🔍 最近一次跳空缺口分析 ({gap_info['日期']})")
-            gcol1, gcol2, gcol3 = st.columns(3)
-            gcol1.write(f"**缺口上緣：** {gap_info['缺口上緣']}")
-            gcol2.write(f"**缺口下緣：** {gap_info['缺口下緣']}")
-            gcol3.write(f"**目前狀態：** {gap_info['目前狀態']}")
-        else:
-            st.info("💡 最近 60 天內未偵測到明顯的多頭跳空缺口。")
+        up_gap = find_last_gap(data, type='up')
+        down_gap = find_last_gap(data, type='down')
+        
+        col_gap1, col_gap2 = st.columns(2)
+        with col_gap1:
+            if up_gap:
+                st.markdown(f"#### 🟢 最近一次上漲跳空 ({up_gap['日期']})")
+                st.write(f"上緣: {up_gap['上緣']} / 下緣: {up_gap['下緣']}")
+                st.write(f"狀態: {up_gap['狀態']}")
+            else: st.info("💡 無上漲跳空缺口")
+            
+        with col_gap2:
+            if down_gap:
+                st.markdown(f"#### 🔴 最近一次下跌跳空 ({down_gap['日期']})")
+                st.write(f"上緣: {down_gap['上緣']} / 下緣: {down_gap['下緣']}")
+                st.write(f"狀態: {down_gap['狀態']}")
+            else: st.info("💡 無下跌跳空缺口")
         
         st.markdown("### 📊 近期數據詳情")
         st.dataframe(data.tail(10).style.highlight_max(axis=0), use_container_width=True)
@@ -184,7 +195,8 @@ with tab2:
     st.info("""
     1. **量增**：今日成交量 ≥ 5日均量的 2 倍。
     2. **價強**：股價站上 5日、10日、20日均線。
-    3. **多頭趨勢**：5日、10日、20日均線皆比昨日上揚。
+    3. **多頭趨勢**：5日、10日、20日均線均比昨日上揚。
+    4. **缺口回補**：正在回補或已站上最近一次的「下跌跳空缺口」上緣。
     """)
     
     if st.button('開始全自動熱選掃描 (16 檔概念股)'):
